@@ -69,13 +69,15 @@ PPR = 2048
 COUNTS_PER_REV = PPR * 4       # 8192 counts/rev
 ROBOT_TRACK_WIDTH_M = 0.25     # distance between wheel centers (tune!)
 
-# GPIO pins
-LEFT_A = 15
-LEFT_B = 14
-LEFT_X = 18
-RIGHT_A = 20
-RIGHT_B = 16
-RIGHT_X = 21
+# GPIO pins (BCM) — rotary encoders
+# Left encoder:  A=18 (CLK), B=17, X=27
+# Right encoder: A=14 (TXD), B=4, X=15 (RXD)
+LEFT_A = 18
+LEFT_B = 17
+LEFT_X = 27
+RIGHT_A = 14
+RIGHT_B = 4
+RIGHT_X = 15
 
 # Timing
 POLLING_RATE = 0.03    # main loop period [s] ~33 Hz
@@ -915,5 +917,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
