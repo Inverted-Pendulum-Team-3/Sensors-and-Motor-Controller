@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """
-sensorsCAL.py — sensorsENC.py with two-point ±90° calibration.
 
 Calibration procedure (run once at startup):
   1. Lay the pendulum flat FORWARD  (+90° position) → press Enter
