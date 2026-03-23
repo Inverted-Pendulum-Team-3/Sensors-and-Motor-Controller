@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
 
+
 Calibration procedure (run once at startup):
-  1. Lay the pendulum flat FORWARD  (+90° position) → press Enter
-  2. Lay the pendulum flat BACKWARD (−90° position) → press Enter
-  The true upright zero = midpoint of the two raw IMU readings.
-  This is more robust than assuming the robot is level at startup.
+1. Hold the robot UPRIGHT at the balance point → press Enter
+The average raw pitch over the sample window is set as the offset
+so the balance point reads exactly 0° during operation.
+
+All other behaviour (encoder scale fix, obs vector, cache/DB writes).
 
 IMU mounting (robot): arrow pointing to X on the IMU is pointed FORWARD.
-  So: X = forward, Y = lateral (left/right), Z = up.
-  Pitch (forward/back tilt) = rotation about Y axis → pitch_rate = gyro_y.
-  Roll (side-to-side tilt)  = rotation about X axis → roll_rate  = gyro_x.
+So: X = forward, Y = lateral (left/right), Z = up.
+Pitch (forward/back tilt) = rotation about Y axis → pitch_rate = gyro_y.
+Roll (side-to-side tilt)  = rotation about X axis → roll_rate  = gyro_x.
 """
 
 import time
@@ -50,12 +52,6 @@ RIGHT_WHEEL_SIGN = 1
 LEFT_WHEEL_SCALE = 0.5
 RIGHT_WHEEL_SCALE = 1.0
 
-# Ultrasonic (HC-SR04), same pins as sensorsNEW.py: Right Trig=8 Echo=11, Left Trig=22 Echo=10
-TRIG_RIGHT, ECHO_RIGHT = 8, 11
-TRIG_LEFT, ECHO_LEFT = 22, 10
-ULTRASONIC_ECHO_TIMEOUT_S = 0.025
-ULTRASONIC_INTER_SENSOR_DELAY_S = 0.012
-CM_PER_US = 1.0 / 58.3
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(_SCRIPT_DIR, "sensor_data.db")
@@ -116,21 +112,6 @@ class Encoder:
     def wheel_linear_speed(self):
         return self.speed_rad_s * WHEEL_RADIUS_M
 
-
-def _read_ultrasonic_cm(trig_pin, echo_pin):
-    """Trigger HC-SR04 and return distance in cm, or None on timeout."""
-    GPIO.output(trig_pin, True)
-    time.sleep(10e-6)
-    GPIO.output(trig_pin, False)
-    t0 = time.monotonic()
-    while GPIO.input(echo_pin) == 0:
-        if time.monotonic() - t0 > ULTRASONIC_ECHO_TIMEOUT_S:
-            return None
-    start = time.monotonic()
-    while GPIO.input(echo_pin) == 1:
-        if time.monotonic() - start > ULTRASONIC_ECHO_TIMEOUT_S:
-            return None
-    return (time.monotonic() - start) * 1e6 * CM_PER_US
 
 
 # ---------------------------------------------------------------------------
@@ -208,11 +189,8 @@ class BNO085_IMU:
         self.max_connection_attempts = 3
         self.reconnect_delay = 2.0  # seconds
 
-        # Calibration offset in degrees so that "level" after calibration reads ~0° pitch
+        # Calibration offset — set from 0° upright sample so balance point reads 0°
         self.pitch_offset_deg = None
-        # Two-slope scale factors so ±90° physical positions read ±90° after calibration
-        self.pitch_scale_pos = 1.0   # applied when pitch > 0
-        self.pitch_scale_neg = 1.0   # applied when pitch < 0
 
         self._initialize_imu()
 
@@ -282,80 +260,42 @@ class BNO085_IMU:
 
     def calibrate_pitch(self, duration_s=3.0):
         """
-        Two-point ±90° calibration.
+        Single-point 0° calibration.
 
-        Steps (operator guided via console prompts):
-          1. Lay the pendulum flat FORWARD  (+90°) → hold still → press Enter
-          2. Lay the pendulum flat BACKWARD (−90°) → hold still → press Enter
-          3. Stand the robot UPRIGHT (balanced, 0°)  → hold still → press Enter
-
-        Three estimates of the true zero are computed and averaged:
-            midpoint  = (raw_+90 + raw_-90) / 2   (geometric zero from ±90°)
-            direct    = raw_0                       (directly measured upright)
-            offset    = (midpoint + direct) / 2    (final blended offset)
-
-        Using all three positions makes the calibration robust to small
-        errors in any single position.
+        Hold the robot upright at the balance point and press Enter.
+        The average raw pitch over the sample window is stored as the offset
+        so the balance point reads 0° during operation.
         """
         if self.bno is None and not self._attempt_reconnection():
             print(f"{self.imu_name}: cannot calibrate, IMU not connected.")
             return
 
-        def _sample_pitch(label, duration):
-            input(f"\n  >>> Place the pendulum at {label}, hold it STILL, then press Enter...")
-            print(f"  Sampling for {duration:.1f} s — keep it still...")
-            t_end = time.monotonic() + duration
-            samples = []
-            while time.monotonic() < t_end:
-                try:
-                    qi, qj, qk, qr = self.bno.quaternion
-                    _, p, _ = self.quaternion_to_euler(qi, qj, qk, qr)
-                    samples.append(p)
-                except Exception:
-                    pass
-                time.sleep(0.01)
-            if not samples:
-                print(f"  WARNING: no samples collected at {label}! Using 0.")
-                return 0.0
-            avg = sum(samples) / len(samples)
-            print(f"  {label} raw pitch = {avg:+.3f}°  ({len(samples)} samples)")
-            return avg
-
         print(f"\n{'='*55}")
-        print(f"  {self.imu_name}: Three-point pitch calibration")
-        print(f"  You will be prompted to place the robot pendulum at")
-        print(f"  +90° (flat forward), −90° (flat backward),")
-        print(f"  and 0° (upright / balanced) in turn.")
+        print(f"  {self.imu_name}: Zero-point pitch calibration")
+        print(f"  Hold the robot UPRIGHT at the balance point.")
         print(f"{'='*55}")
+        input(f"\n  >>> Hold the robot UPRIGHT and STILL, then press Enter...")
+        print(f"  Sampling for {duration_s:.1f} s — keep it still...")
 
-        p_pos  = _sample_pitch("+90° (flat FORWARD)",  duration_s)
-        p_neg  = _sample_pitch("-90° (flat BACKWARD)", duration_s)
-        p_zero = _sample_pitch("0°  (UPRIGHT balanced)", duration_s)
+        t_end = time.monotonic() + duration_s
+        samples = []
+        while time.monotonic() < t_end:
+            try:
+                qi, qj, qk, qr = self.bno.quaternion
+                _, p, _ = self.quaternion_to_euler(qi, qj, qk, qr)
+                samples.append(p)
+            except Exception:
+                pass
+            time.sleep(0.01)
 
-        midpoint = (p_pos + p_neg) / 2.0
-        self.pitch_offset_deg = p_zero
+        if samples:
+            self.pitch_offset_deg = sum(samples) / len(samples)
+            print(f"\n  raw 0° = {self.pitch_offset_deg:+.3f}°  ({len(samples)} samples)")
+            print(f"  → pitch offset = {self.pitch_offset_deg:+.3f}°")
+        else:
+            print(f"  WARNING: no samples collected! Offset set to 0.")
+            self.pitch_offset_deg = 0.0
 
-        # Two-slope scale: stretch/compress so that the ±90° positions read exactly ±90°
-        # scale = expected_angle / actual_reading_after_offset
-        actual_pos = p_pos - p_zero   # what +90° reads after offset subtraction
-        actual_neg = p_neg - p_zero   # what -90° reads after offset subtraction (negative)
-        self.pitch_scale_pos = 90.0 / actual_pos  if abs(actual_pos) > 1.0 else 1.0
-        self.pitch_scale_neg = 90.0 / abs(actual_neg) if abs(actual_neg) > 1.0 else 1.0
-
-        print(f"\n  raw +90°   = {p_pos:+.3f}°  →  after offset: {actual_pos:+.3f}°  →  scale_pos = {self.pitch_scale_pos:.4f}")
-        print(f"  raw -90°   = {p_neg:+.3f}°  →  after offset: {actual_neg:+.3f}°  →  scale_neg = {self.pitch_scale_neg:.4f}")
-        print(f"  midpoint (±90° avg) = {midpoint:+.3f}°  (for reference)")
-        print(f"  raw 0°     = {p_zero:+.3f}°")
-        print(f"  → pitch offset = {self.pitch_offset_deg:+.3f}°  (direct upright measurement)")
-        print(f"  → scale_pos    = {self.pitch_scale_pos:.4f}  (forward direction)")
-        print(f"  → scale_neg    = {self.pitch_scale_neg:.4f}  (backward direction)")
-        # Self-test: verify scaled values match expected ±90°
-        test_pos = actual_pos * self.pitch_scale_pos
-        test_neg = actual_neg * self.pitch_scale_neg
-        print(f"\n  SELF-TEST (values after full correction):")
-        print(f"    +90° position → {test_pos:+.2f}°  (target: +90.00°)")
-        print(f"    -90° position → {test_neg:+.2f}°  (target: -90.00°)")
-        print(f"     0° position  →  +0.00°  (target:  +0.00°)")
         print(f"  Calibration complete.\n")
 
     def get_sensor_data(self):
@@ -377,12 +317,6 @@ class BNO085_IMU:
                 pitch -= 360.0
             elif pitch < -180.0:
                 pitch += 360.0
-
-            # Apply two-slope scale correction so ±90° physical reads ±90°
-            if pitch >= 0.0:
-                pitch *= self.pitch_scale_pos
-            else:
-                pitch *= self.pitch_scale_neg
 
             gyro_x, gyro_y, gyro_z = self.bno.gyro
 
@@ -421,12 +355,6 @@ def main():
     right_enc = Encoder(RIGHT_A, RIGHT_B, RIGHT_X)
     left_enc.setup()
     right_enc.setup()
-    for p in (TRIG_RIGHT, TRIG_LEFT):
-        GPIO.setup(p, GPIO.OUT)
-        GPIO.output(p, False)
-    for p in (ECHO_RIGHT, ECHO_LEFT):
-        GPIO.setup(p, GPIO.IN)
-    db_conn = None
     successful_reads = 0
     failed_reads = 0
     reading_count = 0
@@ -450,11 +378,9 @@ def main():
         print("  [7] rotation_error    (rad/s)   target_rotation_rate - yaw_rate (set in get_sensor_data)")
         print("  [8] yaw               (rad)     absolute heading from IMU quaternion")
         print("  pitch_deg            (deg)     same as [1] in degrees")
-        print("  US R / L              (cm)     ultrasonic right & left (HC-SR04)")
         print()
 
-        db_conn = init_db(DB_FILE)
-        print("Database: %s  |  Cache: %s" % (DB_FILE, OBS_CACHE_FILE))
+        print("Cache: %s" % OBS_CACHE_FILE)
         print()
 
         # Encoders must be polled at high rate (~5 kHz) or quadrature edges are missed and speed stays 0
@@ -470,7 +396,7 @@ def main():
         while True:
             now = time.monotonic()
 
-            # Compute speeds at the display/sample rate (~10 Hz); position is updated by encoder_loop
+            # Compute speeds at ~100 Hz; position is updated by encoder_loop
             left_enc.compute_speed()
             right_enc.compute_speed()
             v_l = left_enc.wheel_linear_speed() * LEFT_WHEEL_SIGN * LEFT_WHEEL_SCALE
@@ -509,35 +435,6 @@ def main():
                 except Exception:
                     pass
 
-                d_right = _read_ultrasonic_cm(TRIG_RIGHT, ECHO_RIGHT)
-                time.sleep(ULTRASONIC_INTER_SENSOR_DELAY_S)
-                d_left = _read_ultrasonic_cm(TRIG_LEFT, ECHO_LEFT)
-
-                # Build row for SQLite (same schema as sensorsNEW / hardware_interface)
-                gx, gy, gz = data1["gyro_x"], data1["gyro_y"], data1["gyro_z"]
-                imu1_rot_vel = math.sqrt(gx * gx + gy * gy + gz * gz)
-                data = {
-                    "timestamp": now,
-                    "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
-                    "imu1_gx": gx, "imu1_gy": gy, "imu1_gz": gz,
-                    "imu1_ax": 0.0, "imu1_ay": 0.0, "imu1_az": 0.0,
-                    "imu1_body_pitch": pitch_rad, "imu1_yaw_rate": gz, "imu1_rot_vel": imu1_rot_vel,
-                    "imu1_vx": 0.0, "imu1_vy": 0.0, "imu1_vz": 0.0,
-                    "imu2_gx": 0.0, "imu2_gy": 0.0, "imu2_gz": 0.0,
-                    "imu2_ax": 0.0, "imu2_ay": 0.0, "imu2_az": 0.0,
-                    "imu2_pendulum_angle": 0.0, "imu2_pendulum_angle_deg": 0.0,
-                    "imu2_pendulum_ang_vel": 0.0, "imu2_rot_vel": 0.0,
-                    "encoder_left_rad_s": wheel_velocity_1,
-                    "encoder_right_rad_s": wheel_velocity_2,
-                    "encoder_left_dir": left_enc.direction,
-                    "encoder_right_dir": right_enc.direction,
-                    "robot_v": v_robot, "robot_w_enc": w_robot_enc,
-                    "ultrasonic_right_cm": d_right, "ultrasonic_left_cm": d_left,
-                    "imu1_connected": 1, "imu2_connected": 0,
-                    "encoder_left_connected": 1 if left_enc.connected else 0,
-                    "encoder_right_connected": 1 if right_enc.connected else 0,
-                }
-                insert_reading(db_conn, data)
 
                 # Order: linear_velocity, pitch, pitch_rate, yaw_rate, wheel_velocity_1, wheel_velocity_2, 0, 0, yaw
                 obs = [
@@ -552,13 +449,11 @@ def main():
                     yaw_rad,  # absolute yaw from IMU quaternion (rad)
                 ]
 
-                us_r = "%.1f" % d_right if d_right is not None else "---"
-                us_l = "%.1f" % d_left if d_left is not None else "---"
                 line = (
-                    "obs=[%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.1f, %.3f] | pitch_deg=%7.2f | yaw_deg=%7.2f | US R=%s L=%s cm"
+                    "obs=[%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.1f, %.3f] | pitch_deg=%7.2f | yaw_deg=%7.2f"
                     % (
                         obs[0], obs[1], obs[2], obs[3], obs[4], obs[5], obs[6], obs[7], obs[8],
-                        data1["pitch"], data1["yaw"], us_r, us_l,
+                        data1["pitch"], data1["yaw"],
                     )
                 )
                 pad = " " * 10
@@ -573,7 +468,7 @@ def main():
                 sys.stdout.write("\r" + line + pad + "\r")
                 sys.stdout.flush()
 
-            time.sleep(0.02)  # ~50 Hz display rate
+            time.sleep(0.01)  # ~100 Hz
 
     except KeyboardInterrupt:
         print("\n" + "=" * 60)
@@ -591,11 +486,6 @@ def main():
 
     finally:
         running = False
-        if db_conn is not None:
-            try:
-                db_conn.close()
-            except Exception:
-                pass
         GPIO.cleanup()
 
 
