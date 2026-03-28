@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-
+sensorsCALZero.py — sensorsENC.py with single-point 0° calibration.
 
 Calibration procedure (run once at startup):
 1. Hold the robot UPRIGHT at the balance point → press Enter
 The average raw pitch over the sample window is set as the offset
 so the balance point reads exactly 0° during operation.
 
-All other behaviour (encoder scale fix, obs vector, cache/DB writes).
+All other behaviour (encoder scale fix, obs vector, cache/DB writes)
+is identical to sensorsENC.py.
 
 IMU mounting (robot): arrow pointing to X on the IMU is pointed FORWARD.
 So: X = forward, Y = lateral (left/right), Z = up.
